@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
-import PDFParse from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 
@@ -64,8 +64,13 @@ export async function POST(request: NextRequest) {
     contractText = directText.trim();
   } else {
     const buffer = Buffer.from(await file!.arrayBuffer());
-    const result = await PDFParse(buffer);
-    contractText = result.text.trim();
+    const parser = new PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      contractText = result.text.trim();
+    } finally {
+      await parser.destroy();
+    }
   }
 
   if (!contractText) {
