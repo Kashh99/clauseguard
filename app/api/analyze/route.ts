@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
+import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
 import { PDFParse } from 'pdf-parse';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
@@ -46,8 +46,10 @@ export async function POST(request: NextRequest) {
 
   const file = formData.get('file') as File | null;
   const jurisdiction = formData.get('jurisdiction') as string | null;
+  const contractTypeHint = formData.get('contractType') as string | null;
+  const directText = formData.get('text') as string | null;
 
-  if (!file || file.type !== 'application/pdf') {
+  if (!directText && (!file || file.type !== 'application/pdf')) {
     return Response.json({ error: 'A PDF file is required (field name: "file")' }, { status: 400 });
   }
   if (!jurisdiction || !(JURISDICTIONS as readonly string[]).includes(jurisdiction)) {
@@ -57,15 +59,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Extract text from the PDF.
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const parser = new PDFParse({ data: buffer });
-  let contractText: string;
-  try {
-    const result = await parser.getText();
-    contractText = result.text.trim();
-  } finally {
-    await parser.destroy();
+  let contractText = '';
+  if (directText) {
+    contractText = directText.trim();
+  } else {
+    const buffer = Buffer.from(await file!.arrayBuffer());
+    const parser = new PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      contractText = result.text.trim();
+    } finally {
+      await parser.destroy();
+    }
   }
 
   if (!contractText) {
@@ -82,26 +87,37 @@ export async function POST(request: NextRequest) {
 
   // Send to Claude. The system prompt is marked for prompt caching; the contract
   // text is never cached since every document is unique.
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
-    system: [
+  let message: Anthropic.Message;
+  try {
+    message = await client.messages.create(
       {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [
-      {
-        role: 'user',
-        content: `Analyze this contract for someone in ${jurisdiction}. Apply ${jurisdiction} law, tenant/employee protections, and local market standards when assessing risk.
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        system: [
+          {
+            type: 'text',
+            text: SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: `Analyze this contract for someone in ${jurisdiction}.${contractTypeHint ? ` The user has identified this as a ${contractTypeHint}.` : ''} Apply ${jurisdiction} law, tenant/employee protections, and local market standards when assessing risk.
 
 CONTRACT:
 ${truncated}`,
+          },
+        ],
       },
-    ],
-  });
+      { timeout: 60_000 },
+    );
+  } catch (err) {
+    if (err instanceof APIConnectionTimeoutError) {
+      return Response.json({ error: 'Analysis timed out — please try again' }, { status: 504 });
+    }
+    throw err;
+  }
 
   const responseBlock = message.content[0];
   if (responseBlock.type !== 'text') {
@@ -119,6 +135,18 @@ ${truncated}`,
     analysis = JSON.parse(jsonText);
   } catch {
     return Response.json({ error: 'AI returned malformed JSON — please retry' }, { status: 500 });
+  }
+
+  if (!analysis || typeof analysis !== 'object' || !Array.isArray(analysis.clauses)) {
+    return Response.json({ error: 'AI returned an unexpected response shape — please retry' }, { status: 500 });
+  }
+
+  const VALID_RISK = new Set(['green', 'amber', 'red']);
+  const invalidClause = analysis.clauses.find(
+    c => !c.title || !VALID_RISK.has(c.riskLevel),
+  );
+  if (invalidClause) {
+    return Response.json({ error: 'AI returned invalid clause data — please retry' }, { status: 500 });
   }
 
   analysis.jurisdiction = jurisdiction as Jurisdiction;

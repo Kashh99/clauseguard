@@ -12,9 +12,24 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const META_TITLE = "ClauseGuard — Understand every clause before you sign";
+const META_DESC = "Upload any lease or employment contract and get an instant plain-English breakdown with color-coded risk flags and negotiation tips. Free AI-powered contract analysis.";
+
 export const metadata: Metadata = {
-  title: "ClauseGuard — Understand every clause before you sign",
-  description: "AI-powered contract analysis with plain-English explanations and color-coded risk flags for leases and employment contracts.",
+  title: META_TITLE,
+  description: META_DESC,
+  openGraph: {
+    title: META_TITLE,
+    description: META_DESC,
+    type: "website",
+    images: [{ url: "/og-image.png" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: META_TITLE,
+    description: META_DESC,
+    images: ["/og-image.png"],
+  },
 };
 
 export default function RootLayout({

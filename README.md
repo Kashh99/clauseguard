@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🛡️ ClauseGuard
 
-## Getting Started
+AI-powered contract analysis that explains every clause in plain English before you sign.
 
-First, run the development server:
+**[Live Demo →](https://clauseguard-seven.vercel.app)**
+
+![ClauseGuard Screenshot](screenshot.png)
+
+---
+
+## Features
+
+- **Drag-and-drop PDF upload** — paste a lease or employment contract and get results in seconds
+- **Color-coded risk flags** — green (standard), amber (watch this), red (risky/unusual)
+- **Plain-English explanations** — no legal jargon, written for the person signing
+- **Negotiation tips** — actionable advice on every amber and red clause
+- **Jurisdiction-aware analysis** — tailored for Ontario, BC, California, and New York law
+- **Sample contract** — try it instantly without uploading anything
+- **Prompt caching** — fast, cost-efficient Claude API calls on repeated analyses
+
+## Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Framework | Next.js 14 App Router |
+| Language | TypeScript |
+| Styling | Tailwind CSS v4 |
+| AI | Anthropic Claude API (`claude-sonnet-4-6`) |
+| PDF parsing | pdf-parse v2 |
+| Deployment | Vercel |
+
+## Local Setup
+
+### Prerequisites
+
+- Node.js 18+
+- An [Anthropic API key](https://console.anthropic.com/)
+
+### Steps
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/Kashh99/clauseguard.git
+cd clauseguard
+
+# 2. Install dependencies
+npm install
+
+# 3. Add your API key (see Environment Variables below)
+
+# 4. Start the dev server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create a `.env.local` file in the project root:
 
-## Learn More
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
-To learn more about Next.js, take a look at the following resources:
+Never commit this file. It is already listed in `.gitignore`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deploy
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The easiest path is one-click deploy to Vercel:
 
-## Deploy on Vercel
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Kashh99/clauseguard)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Add `ANTHROPIC_API_KEY` as an environment variable in the Vercel project settings before deploying.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Disclaimer
+
+ClauseGuard is for informational purposes only. It is not a substitute for advice from a qualified lawyer.

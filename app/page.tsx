@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import type { ContractAnalysis, ClauseAnalysis, RiskLevel } from '@/lib/types';
 import { JURISDICTIONS } from '@/lib/types';
+
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const CONTRACT_TYPES = ['Lease Agreement', 'Employment Contract'] as const;
 type ContractType = (typeof CONTRACT_TYPES)[number] | '';
@@ -25,7 +27,42 @@ const RISK = {
   },
 } as const;
 
-// Icons
+const SAMPLE_LEASE_TEXT = `RESIDENTIAL LEASE AGREEMENT
+
+This Residential Lease Agreement is entered into as of January 1, 2024, between 123 Properties Inc. ("Landlord") and the undersigned Tenant(s).
+
+1. PREMISES
+The Landlord agrees to lease to the Tenant the property located at 456 Main Street, Unit 3B, Toronto, Ontario M5V 2H1 ("the Premises").
+
+2. TERM AND AUTOMATIC RENEWAL
+The initial lease term begins February 1, 2024 and ends January 31, 2025. UPON EXPIRY OF THE INITIAL TERM, THIS LEASE SHALL AUTOMATICALLY RENEW FOR SUCCESSIVE ONE-YEAR PERIODS UNLESS EITHER PARTY PROVIDES WRITTEN NOTICE OF TERMINATION NO LESS THAN 90 DAYS PRIOR TO THE END OF THE THEN-CURRENT TERM. Failure to provide such notice shall bind the Tenant to an additional full year's lease obligations, including all rent payments.
+
+3. RENT AND INCREASES
+Monthly rent is $2,200 CAD, due on the first day of each month. THE LANDLORD RESERVES THE RIGHT TO INCREASE THE MONTHLY RENT AT ANY TIME UPON 30 DAYS WRITTEN NOTICE, AT THE LANDLORD'S SOLE DISCRETION AND WITHOUT LIMITATION AS TO AMOUNT OR FREQUENCY.
+
+4. LATE PAYMENT FEE
+If rent is not received in full by the 3rd day of the month, a late fee of $200.00 shall be immediately due and payable in addition to the monthly rent, regardless of the reason for the delay.
+
+5. REPAIRS AND MAINTENANCE
+The Tenant shall be solely responsible for all repairs and maintenance to the Premises costing less than $500.00, including but not limited to plumbing repairs, appliance servicing, window repairs, door hardware, and damage arising from ordinary wear and tear. The Landlord assumes responsibility only for repairs exceeding $500.00.
+
+6. PETS
+No pets of any kind are permitted on or within the Premises at any time, including temporary or visiting animals. Discovery of any pet shall constitute grounds for immediate termination of this lease and automatic forfeiture of the entire security deposit.
+
+7. LANDLORD ENTRY
+The Landlord or the Landlord's agents may enter the Premises at any time for the purposes of inspection, repair, maintenance, or showing to prospective tenants or purchasers. VERBAL NOTICE BY TELEPHONE OR IN PERSON IS SUFFICIENT AND THE LANDLORD IS NOT REQUIRED TO PROVIDE ADVANCE WRITTEN NOTICE WHEN ENTRY IS DEEMED NECESSARY BY THE LANDLORD.
+
+8. SECURITY DEPOSIT
+A security deposit of $4,400.00 (equivalent to two months' rent) is required prior to occupancy. The Landlord may apply any or all of the security deposit toward unpaid rent, damages beyond normal wear and tear, or cleaning costs at the Landlord's sole discretion.
+
+9. SUBLETTING AND ASSIGNMENT
+The Tenant shall not sublet the Premises, assign this lease, or permit any other person to occupy the Premises without the prior written consent of the Landlord. Such consent may be withheld by the Landlord for any reason or no reason, at the Landlord's absolute discretion.
+
+10. GOVERNING LAW
+This Agreement is governed by the laws of the Province of Ontario.`;
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
+
 function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg className={className} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
@@ -69,12 +106,13 @@ function BulbIcon({ className }: { className?: string }) {
 function ChevronIcon({ down }: { down?: boolean }) {
   return (
     <svg className="w-3 h-3 transition-transform" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d={down ? "M19.5 8.25l-7.5 7.5-7.5-7.5" : "M4.5 15.75l7.5-7.5 7.5 7.5"} />
+      <path strokeLinecap="round" strokeLinejoin="round" d={down ? 'M19.5 8.25l-7.5 7.5-7.5-7.5' : 'M4.5 15.75l7.5-7.5 7.5 7.5'} />
     </svg>
   );
 }
 
-// Risk badge
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
 function RiskBadge({ level }: { level: RiskLevel }) {
   const cfg = RISK[level];
   const dots = { green: '🟢', amber: '🟡', red: '🔴' };
@@ -86,8 +124,15 @@ function RiskBadge({ level }: { level: RiskLevel }) {
   );
 }
 
-// Clause card
-function ClauseCard({ clause, expanded, onToggle }: { clause: ClauseAnalysis; expanded: boolean; onToggle: () => void }) {
+function ClauseCard({
+  clause,
+  expanded,
+  onToggle,
+}: {
+  clause: ClauseAnalysis;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const cfg = RISK[clause.riskLevel];
   const hasTip = clause.negotiationTip !== null && clause.negotiationTip !== undefined;
 
@@ -132,7 +177,6 @@ function ClauseCard({ clause, expanded, onToggle }: { clause: ClauseAnalysis; ex
   );
 }
 
-// Risk overview
 function RiskOverview({ clauses }: { clauses: ClauseAnalysis[] }) {
   const counts = {
     green: clauses.filter(c => c.riskLevel === 'green').length,
@@ -142,8 +186,8 @@ function RiskOverview({ clauses }: { clauses: ClauseAnalysis[] }) {
 
   const items = [
     { level: 'green' as const, label: 'Standard', count: counts.green, badge: 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/20' },
-    { level: 'amber' as const, label: 'Review', count: counts.amber, badge: 'bg-amber-500/10 text-amber-400 ring-amber-500/20' },
-    { level: 'red' as const, label: 'Risky', count: counts.red, badge: 'bg-red-500/10 text-red-400 ring-red-500/20' },
+    { level: 'amber' as const, label: 'Review',   count: counts.amber, badge: 'bg-amber-500/10 text-amber-400 ring-amber-500/20' },
+    { level: 'red'   as const, label: 'Risky',    count: counts.red,   badge: 'bg-red-500/10 text-red-400 ring-red-500/20' },
   ];
 
   return (
@@ -158,28 +202,30 @@ function RiskOverview({ clauses }: { clauses: ClauseAnalysis[] }) {
   );
 }
 
-// Main component
+// ─── Main page ────────────────────────────────────────────────────────────────
+
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
+  const [file, setFile]               = useState<File | null>(null);
+  const [sampleText, setSampleText]   = useState<string | null>(null);
   const [jurisdiction, setJurisdiction] = useState('');
   const [contractType, setContractType] = useState<ContractType>('');
-  const [isDragging, setIsDragging] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [analysis, setAnalysis] = useState<ContractAnalysis | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [isDragging, setIsDragging]   = useState(false);
+  const [isLoading, setIsLoading]     = useState(false);
+  const [analysis, setAnalysis]       = useState<ContractAnalysis | null>(null);
+  const [error, setError]             = useState<string | null>(null);
   const [expandedTips, setExpandedTips] = useState<Set<number>>(new Set());
   const [loadingStage, setLoadingStage] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const resultsRef = useRef<HTMLDivElement>(null);
+  const resultsRef   = useRef<HTMLDivElement>(null);
 
-  const LOADING_STAGES = [
+  const LOADING_STAGES = useMemo(() => [
     'Extracting contract text…',
     'Identifying key clauses…',
     `Assessing risks for ${jurisdiction}…`,
     'Generating explanations…',
     'Preparing your analysis…',
-  ];
+  ], [jurisdiction]);
 
   useEffect(() => {
     if (!isLoading) return;
@@ -187,15 +233,30 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [isLoading, LOADING_STAGES]);
 
+  const loadSample = () => {
+    setSampleText(SAMPLE_LEASE_TEXT);
+    setFile(null);
+    setJurisdiction('Ontario');
+    setContractType('Lease Agreement');
+    setAnalysis(null);
+    setError(null);
+    setExpandedTips(new Set());
+  };
+
   const acceptFile = (f: File) => {
-    if (f.type === 'application/pdf') {
-      setFile(f);
-      setAnalysis(null);
-      setError(null);
-      setExpandedTips(new Set());
-    } else {
+    if (f.type !== 'application/pdf') {
       setError('Only PDF files are supported.');
+      return;
     }
+    if (f.size > MAX_FILE_BYTES) {
+      setError('File is too large (max 20 MB). Contract PDFs are usually much smaller.');
+      return;
+    }
+    setFile(f);
+    setSampleText(null);
+    setAnalysis(null);
+    setError(null);
+    setExpandedTips(new Set());
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -212,7 +273,7 @@ export default function Home() {
   };
 
   const handleAnalyze = async () => {
-    if (!file || !jurisdiction || isLoading) return;
+    if ((!file && !sampleText) || !jurisdiction || isLoading) return;
 
     setIsLoading(true);
     setError(null);
@@ -221,12 +282,16 @@ export default function Home() {
     setExpandedTips(new Set());
 
     const fd = new FormData();
-    fd.append('file', file);
+    if (file) {
+      fd.append('file', file);
+    } else {
+      fd.append('text', sampleText!);
+    }
     fd.append('jurisdiction', jurisdiction);
     if (contractType) fd.append('contractType', contractType);
 
     try {
-      const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+      const res  = await fetch('/api/analyze', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? 'Analysis failed.');
@@ -235,7 +300,7 @@ export default function Home() {
       setAnalysis(data);
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 150);
     } catch {
-      setError('Network error. Please try again.');
+      setError('Network error. Please check your connection and try again.');
     } finally {
       setIsLoading(false);
     }
@@ -249,10 +314,12 @@ export default function Home() {
     });
   };
 
-  const canAnalyze = file !== null && jurisdiction !== '' && !isLoading;
+  const hasInput   = file !== null || sampleText !== null;
+  const canAnalyze = hasInput && jurisdiction !== '' && !isLoading;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+
       {/* Header */}
       <header className="sticky top-0 z-20 bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800/60">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
@@ -260,15 +327,18 @@ export default function Home() {
             <ShieldIcon className="w-6 h-6 text-violet-400" />
             <span className="text-lg font-bold">ClauseGuard</span>
           </div>
-          <p className="hidden sm:text-sm text-zinc-500">Understand every clause before you sign</p>
+          <p className="hidden sm:block text-sm text-zinc-500">Understand every clause before you sign</p>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-14 space-y-8">
+      <main className="flex-1 max-w-4xl mx-auto w-full px-4 sm:px-6 py-14 space-y-8">
+
         {/* Hero */}
         <div className="text-center space-y-3">
           <h1 className="text-3xl sm:text-4xl font-bold">Know what you&apos;re signing</h1>
-          <p className="text-zinc-500 max-w-lg mx-auto">Upload a contract and get instant plain-English breakdown with color-coded risk flags.</p>
+          <p className="text-zinc-500 max-w-lg mx-auto">
+            Upload a contract and get an instant plain-English breakdown with color-coded risk flags.
+          </p>
         </div>
 
         {/* Upload card */}
@@ -281,6 +351,7 @@ export default function Home() {
             onChange={handleFileInput}
           />
 
+          {/* Drop zone */}
           <div
             onDragOver={e => (e.preventDefault(), setIsDragging(true))}
             onDragLeave={e => (e.preventDefault(), setIsDragging(false))}
@@ -289,15 +360,28 @@ export default function Home() {
             className={`relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 cursor-pointer transition-all ${
               isDragging
                 ? 'border-violet-500 bg-violet-500/5'
-                : file
-                  ? 'border-emerald-600/50 bg-emerald-500/5'
-                  : 'border-zinc-700 bg-zinc-800/30 hover:border-zinc-600'
+                : sampleText && !file
+                  ? 'border-violet-600/50 bg-violet-500/5'
+                  : file
+                    ? 'border-emerald-600/50 bg-emerald-500/5'
+                    : 'border-zinc-700 bg-zinc-800/30 hover:border-zinc-600'
             }`}
           >
-            {file ? (
+            {sampleText && !file ? (
+              <>
+                <FileIcon className="w-10 h-10 text-violet-400" />
+                <div className="text-center">
+                  <p className="text-sm font-semibold text-violet-400">Sample: Ontario Lease Agreement</p>
+                  <p className="text-xs text-zinc-500 mt-0.5">Click to upload your own contract instead</p>
+                </div>
+                <span className="absolute top-3 right-3 text-xs font-bold bg-violet-500/20 text-violet-400 ring-1 ring-violet-500/30 rounded-full px-2.5 py-0.5 tracking-wide">
+                  SAMPLE
+                </span>
+              </>
+            ) : file ? (
               <>
                 <FileIcon className="w-10 h-10 text-emerald-400" />
-                <div>
+                <div className="text-center">
                   <p className="text-sm font-semibold text-emerald-400 truncate max-w-xs">{file.name}</p>
                   <p className="text-xs text-zinc-500 mt-0.5">{(file.size / 1024).toFixed(0)} KB</p>
                 </div>
@@ -306,12 +390,30 @@ export default function Home() {
               <>
                 <UploadIcon className={`w-10 h-10 transition-colors ${isDragging ? 'text-violet-400' : 'text-zinc-600'}`} />
                 <div className="text-center">
-                  <p className="text-sm font-medium text-zinc-300">{isDragging ? 'Drop your PDF here' : 'Drag & drop your contract'}</p>
-                  <p className="text-xs text-zinc-600 mt-1">or <span className="text-violet-400 underline">click to browse</span></p>
+                  <p className="text-sm font-medium text-zinc-300">
+                    {isDragging ? 'Drop your PDF here' : 'Drag & drop your contract'}
+                  </p>
+                  <p className="text-xs text-zinc-600 mt-1">
+                    or <span className="text-violet-400 underline">click to browse</span>
+                  </p>
                 </div>
               </>
             )}
           </div>
+
+          {/* Sample button — visible only when no input is loaded */}
+          {!hasInput && (
+            <div className="mt-4 flex items-center gap-3">
+              <div className="flex-1 h-px bg-zinc-800" />
+              <button
+                onClick={loadSample}
+                className="text-xs text-zinc-500 hover:text-violet-400 transition-colors whitespace-nowrap"
+              >
+                Try a sample lease →
+              </button>
+              <div className="flex-1 h-px bg-zinc-800" />
+            </div>
+          )}
 
           {/* Selectors */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-5">
@@ -324,9 +426,7 @@ export default function Home() {
               >
                 <option value="">Select jurisdiction…</option>
                 {JURISDICTIONS.map(j => (
-                  <option key={j} value={j}>
-                    {j}
-                  </option>
+                  <option key={j} value={j}>{j}</option>
                 ))}
               </select>
             </div>
@@ -340,9 +440,7 @@ export default function Home() {
               >
                 <option value="">Auto-detect</option>
                 {CONTRACT_TYPES.map(ct => (
-                  <option key={ct} value={ct}>
-                    {ct}
-                  </option>
+                  <option key={ct} value={ct}>{ct}</option>
                 ))}
               </select>
             </div>
@@ -372,17 +470,37 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Error */}
+        {/* Error state */}
         {error && (
-          <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/20 rounded-xl p-4 animate-fade-in-up">
-            <XCircleIcon className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-red-300">{error}</p>
+          <div className="bg-red-500/5 border border-red-500/20 rounded-2xl p-6 animate-fade-in-up">
+            <div className="flex items-start gap-4">
+              <XCircleIcon className="w-6 h-6 text-red-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-red-300">
+                  Something went wrong analyzing your contract
+                </p>
+                <p className="text-xs text-red-400/70 mt-1 leading-relaxed">{error}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setError(null)}
+              className="mt-4 ml-10 text-xs font-medium text-red-400 hover:text-red-300 underline underline-offset-2 transition-colors"
+            >
+              Try again
+            </button>
           </div>
         )}
 
-        {/* Loading skeleton */}
+        {/* Loading state */}
         {isLoading && (
           <div className="space-y-4">
+            <div className="flex flex-col items-center gap-2 py-4">
+              <div className="flex items-center gap-3">
+                <span className="h-5 w-5 rounded-full border-2 border-zinc-700 border-t-violet-500 animate-spin" />
+                <span className="text-base font-medium text-zinc-200">Analyzing your contract…</span>
+              </div>
+              <p className="text-sm text-zinc-500">This usually takes 10–15 seconds</p>
+            </div>
             {[...Array(4)].map((_, i) => (
               <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3 animate-pulse">
                 <div className="flex justify-between items-center">
@@ -399,13 +517,14 @@ export default function Home() {
         {/* Results */}
         {analysis && !isLoading && (
           <div ref={resultsRef} className="space-y-6 animate-fade-in-up">
-            {/* Summary */}
             <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
               <div className="flex flex-wrap items-center gap-2 mb-4">
                 <span className="bg-violet-500/10 text-violet-400 ring-1 ring-violet-500/20 text-xs font-medium rounded-full px-3 py-1">
                   {analysis.contractType}
                 </span>
-                <span className="bg-zinc-800 text-zinc-400 text-xs font-medium rounded-full px-3 py-1">{analysis.jurisdiction}</span>
+                <span className="bg-zinc-800 text-zinc-400 text-xs font-medium rounded-full px-3 py-1">
+                  {analysis.jurisdiction}
+                </span>
               </div>
               <p className="text-sm text-zinc-300 leading-relaxed">{analysis.summary}</p>
 
@@ -415,19 +534,47 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Clauses */}
             <div className="space-y-3">
               {analysis.clauses.map((clause, i) => (
-                <ClauseCard key={i} clause={clause} expanded={expandedTips.has(i)} onToggle={() => toggleTip(i)} />
+                <ClauseCard
+                  key={i}
+                  clause={clause}
+                  expanded={expandedTips.has(i)}
+                  onToggle={() => toggleTip(i)}
+                />
               ))}
             </div>
 
             <p className="text-center text-xs text-zinc-600 pb-4">
-              AI-generated analysis for informational purposes. For significant contracts, consult a lawyer.
+              AI-generated analysis for informational purposes only. For significant contracts, consult a qualified lawyer.
             </p>
           </div>
         )}
       </main>
+
+      {/* Footer */}
+      <footer className="border-t border-zinc-800/60">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-zinc-500">
+              <ShieldIcon className="w-4 h-4 text-violet-500/60" />
+              <span>ClauseGuard — AI-powered contract analysis</span>
+            </div>
+            <a
+              href="https://github.com/Kashh99"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Built by Kashyap Mavani
+            </a>
+          </div>
+          <p className="text-center text-xs text-zinc-700 mt-3">
+            For informational purposes only. Not legal advice.
+          </p>
+        </div>
+      </footer>
+
     </div>
   );
 }
