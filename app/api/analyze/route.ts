@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
-import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 
