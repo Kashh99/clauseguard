@@ -1,8 +1,12 @@
 import type { NextRequest } from 'next/server';
+import { createRequire } from 'module';
 import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
+
+const _require = createRequire(import.meta.url);
+pdfjsLib.GlobalWorkerOptions.workerSrc = `file://${_require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')}`;
 
 export const maxDuration = 60;
 
@@ -65,7 +69,6 @@ export async function POST(request: NextRequest) {
   if (directText) {
     contractText = directText.trim();
   } else {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
     const uint8Array = new Uint8Array(await file!.arrayBuffer());
     const pdf = await pdfjsLib.getDocument({
       data: uint8Array,
