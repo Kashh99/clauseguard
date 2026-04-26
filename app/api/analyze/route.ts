@@ -1,38 +1,10 @@
 import type { NextRequest } from 'next/server';
 import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
+import pdfParse from 'pdf-parse';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 
 export const maxDuration = 60;
-
-// pdfjs-dist v5 calls `new DOMMatrix()` at module-level (SCALE_MATRIX constant).
-// DOMMatrix is not a Node.js global — pdfjs tries to borrow it from @napi-rs/canvas,
-// which isn't installed on Vercel. We stub it here before pdfjs ever loads.
-// The stub only needs to survive construction; actual transforms use .a/.b/.c/.d/.e/.f.
-if (typeof (globalThis as Record<string, unknown>).DOMMatrix === 'undefined') {
-  (globalThis as Record<string, unknown>).DOMMatrix = class DOMMatrix {
-    a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
-    constructor(init?: number[]) {
-      if (Array.isArray(init) && init.length >= 6) {
-        [this.a, this.b, this.c, this.d, this.e, this.f] = init as [number, number, number, number, number, number];
-      }
-    }
-  };
-}
-
-// Lazy-load pdfjs-dist so the DOMMatrix stub above is in place before the module
-// evaluates its top-level code. Cached after first call (Node module cache).
-type PdfjsLib = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
-let _pdfjs: PdfjsLib | null = null;
-async function getPdfjs(): Promise<PdfjsLib> {
-  if (_pdfjs) return _pdfjs;
-  const lib = await import('pdfjs-dist/legacy/build/pdf.mjs') as PdfjsLib;
-  const { createRequire } = await import('module');
-  const req = createRequire(import.meta.url);
-  lib.GlobalWorkerOptions.workerSrc = `file://${req.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')}`;
-  _pdfjs = lib;
-  return lib;
-}
 
 const client = new Anthropic();
 
@@ -93,22 +65,9 @@ export async function POST(request: NextRequest) {
   if (directText) {
     contractText = directText.trim();
   } else {
-    const pdfjsLib = await getPdfjs();
-    const uint8Array = new Uint8Array(await file!.arrayBuffer());
-    const pdf = await pdfjsLib.getDocument({
-      data: uint8Array,
-      useWorkerFetch: false,
-      isEvalSupported: false,
-    }).promise;
-    const pages = await Promise.all(
-      Array.from({ length: pdf.numPages }, (_, i) =>
-        pdf.getPage(i + 1).then(p => p.getTextContent())
-      )
-    );
-    contractText = pages
-      .flatMap(p => p.items.map(item => ('str' in item ? (item as { str: string }).str : '')))
-      .join(' ')
-      .trim();
+    const buffer = Buffer.from(await file!.arrayBuffer());
+    const parsed = await pdfParse(buffer);
+    contractText = parsed.text.trim();
   }
 
   if (!contractText) {
