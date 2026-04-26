@@ -4,6 +4,8 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 
+export const maxDuration = 60;
+
 const client = new Anthropic();
 
 const MAX_TEXT_CHARS = 60_000;
@@ -63,8 +65,13 @@ export async function POST(request: NextRequest) {
   if (directText) {
     contractText = directText.trim();
   } else {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '';
     const uint8Array = new Uint8Array(await file!.arrayBuffer());
-    const pdf = await pdfjsLib.getDocument({ data: uint8Array }).promise;
+    const pdf = await pdfjsLib.getDocument({
+      data: uint8Array,
+      useWorkerFetch: false,
+      isEvalSupported: false,
+    }).promise;
     const pages = await Promise.all(
       Array.from({ length: pdf.numPages }, (_, i) =>
         pdf.getPage(i + 1).then(p => p.getTextContent())
