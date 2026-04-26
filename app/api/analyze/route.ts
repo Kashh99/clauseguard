@@ -1,10 +1,13 @@
 import type { NextRequest } from 'next/server';
 import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
 import pdfParse from 'pdf-parse';
+import { kv } from '@vercel/kv';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 
 export const maxDuration = 60;
+
+const DAILY_LIMIT = 20;
 
 const client = new Anthropic();
 
@@ -50,6 +53,23 @@ export async function POST(request: NextRequest) {
   const jurisdiction = formData.get('jurisdiction') as string | null;
   const contractTypeHint = formData.get('contractType') as string | null;
   const directText = formData.get('text') as string | null;
+
+  // Rate-limit PDF uploads only. Sample contract (directText) always passes through.
+  if (!directText) {
+    try {
+      const dateKey = `analyses:${new Date().toISOString().slice(0, 10)}`;
+      const count = (await kv.get<number>(dateKey)) ?? 0;
+      if (count >= DAILY_LIMIT) {
+        return Response.json(
+          { error: 'Daily demo limit reached. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.' },
+          { status: 429 },
+        );
+      }
+      await kv.set(dateKey, count + 1, { ex: 86400 });
+    } catch {
+      // KV unavailable (local dev without env vars) — skip rate limiting.
+    }
+  }
 
   if (!directText && (!file || file.type !== 'application/pdf')) {
     return Response.json({ error: 'A PDF file is required (field name: "file")' }, { status: 400 });

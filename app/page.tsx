@@ -213,6 +213,7 @@ export default function Home() {
   const [isLoading, setIsLoading]     = useState(false);
   const [analysis, setAnalysis]       = useState<ContractAnalysis | null>(null);
   const [error, setError]             = useState<string | null>(null);
+  const [rateLimited, setRateLimited] = useState(false);
   const [expandedTips, setExpandedTips] = useState<Set<number>>(new Set());
   const [loadingStage, setLoadingStage] = useState(0);
 
@@ -240,6 +241,7 @@ export default function Home() {
     setContractType('Lease Agreement');
     setAnalysis(null);
     setError(null);
+    setRateLimited(false);
     setExpandedTips(new Set());
   };
 
@@ -256,6 +258,7 @@ export default function Home() {
     setSampleText(null);
     setAnalysis(null);
     setError(null);
+    setRateLimited(false);
     setExpandedTips(new Set());
   };
 
@@ -277,6 +280,7 @@ export default function Home() {
 
     setIsLoading(true);
     setError(null);
+    setRateLimited(false);
     setAnalysis(null);
     setLoadingStage(0);
     setExpandedTips(new Set());
@@ -294,7 +298,11 @@ export default function Home() {
       const res  = await fetch('/api/analyze', { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? 'Analysis failed.');
+        if (res.status === 429) {
+          setRateLimited(true);
+        } else {
+          setError(data.error ?? 'Analysis failed.');
+        }
         return;
       }
       setAnalysis(data);
@@ -401,9 +409,14 @@ export default function Home() {
             )}
           </div>
 
+          {/* Free demo note */}
+          <p className="mt-3 text-center text-xs text-zinc-600">
+            Free demo · 20 analyses/day shared across all visitors
+          </p>
+
           {/* Sample button — visible only when no input is loaded */}
           {!hasInput && (
-            <div className="mt-4 flex items-center gap-3">
+            <div className="mt-3 flex items-center gap-3">
               <div className="flex-1 h-px bg-zinc-800" />
               <button
                 onClick={loadSample}
@@ -469,6 +482,27 @@ export default function Home() {
             )}
           </button>
         </div>
+
+        {/* Rate-limit card */}
+        {rateLimited && (
+          <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl p-6 animate-fade-in-up">
+            <div className="flex items-start gap-4">
+              <span className="text-2xl shrink-0">📊</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-amber-300">Daily demo limit reached</p>
+                <p className="text-xs text-amber-400/70 mt-1 leading-relaxed">
+                  This keeps the project free for everyone. Come back tomorrow, or try the sample contract below!
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={loadSample}
+              className="mt-4 ml-10 text-xs font-semibold text-violet-400 hover:text-violet-300 underline underline-offset-2 transition-colors"
+            >
+              Try Sample Contract
+            </button>
+          </div>
+        )}
 
         {/* Error state */}
         {error && (
