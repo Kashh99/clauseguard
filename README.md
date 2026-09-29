@@ -22,11 +22,11 @@ AI-powered contract analysis that explains every clause in plain English before 
 
 | Layer | Choice |
 |---|---|
-| Framework | Next.js 14 App Router |
+| Framework | Next.js 16 App Router |
 | Language | TypeScript |
 | Styling | Tailwind CSS v4 |
 | AI | Anthropic Claude API (`claude-sonnet-4-6`) |
-| PDF parsing | pdf-parse v2 |
+| PDF parsing | pdf-parse v1 |
 | Deployment | Vercel |
 
 ## Local Setup
@@ -75,3 +75,4 @@ Add `ANTHROPIC_API_KEY` as an environment variable in the Vercel project setting
 ## Disclaimer
 
 ClauseGuard is for informational purposes only. It is not a substitute for advice from a qualified lawyer.
+
