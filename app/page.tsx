@@ -27,39 +27,6 @@ const RISK = {
   },
 } as const;
 
-const SAMPLE_LEASE_TEXT = `RESIDENTIAL LEASE AGREEMENT
-
-This Residential Lease Agreement is entered into as of January 1, 2024, between 123 Properties Inc. ("Landlord") and the undersigned Tenant(s).
-
-1. PREMISES
-The Landlord agrees to lease to the Tenant the property located at 456 Main Street, Unit 3B, Toronto, Ontario M5V 2H1 ("the Premises").
-
-2. TERM AND AUTOMATIC RENEWAL
-The initial lease term begins February 1, 2024 and ends January 31, 2025. UPON EXPIRY OF THE INITIAL TERM, THIS LEASE SHALL AUTOMATICALLY RENEW FOR SUCCESSIVE ONE-YEAR PERIODS UNLESS EITHER PARTY PROVIDES WRITTEN NOTICE OF TERMINATION NO LESS THAN 90 DAYS PRIOR TO THE END OF THE THEN-CURRENT TERM. Failure to provide such notice shall bind the Tenant to an additional full year's lease obligations, including all rent payments.
-
-3. RENT AND INCREASES
-Monthly rent is $2,200 CAD, due on the first day of each month. THE LANDLORD RESERVES THE RIGHT TO INCREASE THE MONTHLY RENT AT ANY TIME UPON 30 DAYS WRITTEN NOTICE, AT THE LANDLORD'S SOLE DISCRETION AND WITHOUT LIMITATION AS TO AMOUNT OR FREQUENCY.
-
-4. LATE PAYMENT FEE
-If rent is not received in full by the 3rd day of the month, a late fee of $200.00 shall be immediately due and payable in addition to the monthly rent, regardless of the reason for the delay.
-
-5. REPAIRS AND MAINTENANCE
-The Tenant shall be solely responsible for all repairs and maintenance to the Premises costing less than $500.00, including but not limited to plumbing repairs, appliance servicing, window repairs, door hardware, and damage arising from ordinary wear and tear. The Landlord assumes responsibility only for repairs exceeding $500.00.
-
-6. PETS
-No pets of any kind are permitted on or within the Premises at any time, including temporary or visiting animals. Discovery of any pet shall constitute grounds for immediate termination of this lease and automatic forfeiture of the entire security deposit.
-
-7. LANDLORD ENTRY
-The Landlord or the Landlord's agents may enter the Premises at any time for the purposes of inspection, repair, maintenance, or showing to prospective tenants or purchasers. VERBAL NOTICE BY TELEPHONE OR IN PERSON IS SUFFICIENT AND THE LANDLORD IS NOT REQUIRED TO PROVIDE ADVANCE WRITTEN NOTICE WHEN ENTRY IS DEEMED NECESSARY BY THE LANDLORD.
-
-8. SECURITY DEPOSIT
-A security deposit of $4,400.00 (equivalent to two months' rent) is required prior to occupancy. The Landlord may apply any or all of the security deposit toward unpaid rent, damages beyond normal wear and tear, or cleaning costs at the Landlord's sole discretion.
-
-9. SUBLETTING AND ASSIGNMENT
-The Tenant shall not sublet the Premises, assign this lease, or permit any other person to occupy the Premises without the prior written consent of the Landlord. Such consent may be withheld by the Landlord for any reason or no reason, at the Landlord's absolute discretion.
-
-10. GOVERNING LAW
-This Agreement is governed by the laws of the Province of Ontario.`;
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
@@ -206,7 +173,7 @@ function RiskOverview({ clauses }: { clauses: ClauseAnalysis[] }) {
 
 export default function Home() {
   const [file, setFile]               = useState<File | null>(null);
-  const [sampleText, setSampleText]   = useState<string | null>(null);
+  const [sampleId, setSampleId]       = useState<string | null>(null);
   const [jurisdiction, setJurisdiction] = useState('');
   const [contractType, setContractType] = useState<ContractType>('');
   const [isDragging, setIsDragging]   = useState(false);
@@ -235,7 +202,7 @@ export default function Home() {
   }, [isLoading, LOADING_STAGES]);
 
   const loadSample = () => {
-    setSampleText(SAMPLE_LEASE_TEXT);
+    setSampleId('ontario-lease');
     setFile(null);
     setJurisdiction('Ontario');
     setContractType('Lease Agreement');
@@ -255,7 +222,7 @@ export default function Home() {
       return;
     }
     setFile(f);
-    setSampleText(null);
+    setSampleId(null);
     setAnalysis(null);
     setError(null);
     setRateLimited(false);
@@ -276,7 +243,7 @@ export default function Home() {
   };
 
   const handleAnalyze = async () => {
-    if ((!file && !sampleText) || !jurisdiction || isLoading) return;
+    if ((!file && !sampleId) || !jurisdiction || isLoading) return;
 
     setIsLoading(true);
     setError(null);
@@ -289,7 +256,7 @@ export default function Home() {
     if (file) {
       fd.append('file', file);
     } else {
-      fd.append('text', sampleText!);
+      fd.append('sample', sampleId!);
     }
     fd.append('jurisdiction', jurisdiction);
     if (contractType) fd.append('contractType', contractType);
@@ -322,7 +289,7 @@ export default function Home() {
     });
   };
 
-  const hasInput   = file !== null || sampleText !== null;
+  const hasInput   = file !== null || sampleId !== null;
   const canAnalyze = hasInput && jurisdiction !== '' && !isLoading;
 
   return (
@@ -368,14 +335,14 @@ export default function Home() {
             className={`relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 cursor-pointer transition-all ${
               isDragging
                 ? 'border-violet-500 bg-violet-500/5'
-                : sampleText && !file
+                : sampleId && !file
                   ? 'border-violet-600/50 bg-violet-500/5'
                   : file
                     ? 'border-emerald-600/50 bg-emerald-500/5'
                     : 'border-zinc-700 bg-zinc-800/30 hover:border-zinc-600'
             }`}
           >
-            {sampleText && !file ? (
+            {sampleId && !file ? (
               <>
                 <FileIcon className="w-10 h-10 text-violet-400" />
                 <div className="text-center">
@@ -533,7 +500,7 @@ export default function Home() {
                 <span className="h-5 w-5 rounded-full border-2 border-zinc-700 border-t-violet-500 animate-spin" />
                 <span className="text-base font-medium text-zinc-200">Analyzing your contract…</span>
               </div>
-              <p className="text-sm text-zinc-500">This usually takes 10–15 seconds</p>
+              <p className="text-sm text-zinc-500">This can take up to a minute</p>
             </div>
             {[...Array(4)].map((_, i) => (
               <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3 animate-pulse">
