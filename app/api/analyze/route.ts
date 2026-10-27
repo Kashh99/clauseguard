@@ -7,6 +7,7 @@ import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
 import { clientKey, consumeQuota, refundClientQuota } from '@/lib/rate-limit';
+import { isTestMode, mockResponse, TEST_MODE_MARKER } from '@/lib/test-mode';
 
 // Timeout budget: up to 2 attempts × 120s = 240s for the Claude call, leaving headroom for
 // PDF parsing under the 300s function limit. A full analysis takes ~50s, so the old 60s
@@ -71,6 +72,9 @@ async function analyzeContract(
     contractText.length > MAX_TEXT_CHARS
       ? contractText.slice(0, MAX_TEXT_CHARS) + '\n\n[Document truncated for analysis]'
       : contractText;
+
+  // Backstop: the handler answers test-mode requests with a mock before reaching here.
+  if (isTestMode()) throw new Error(`${TEST_MODE_MARKER}: real model call blocked`);
 
   // Send to Claude. The system prompt is marked for prompt caching; the contract
   // text is never cached since every document is unique.
@@ -250,6 +254,8 @@ async function handleAnalyze(request: NextRequest): Promise<Response> {
     if (typeof sampleId !== 'string' || !Object.hasOwn(SAMPLE_CONTRACTS, sampleId)) {
       return Response.json({ error: 'Unknown sample' }, { status: 400 });
     }
+    // Skips the KV cache too, so a mock is never stored as a sample's real analysis.
+    if (isTestMode()) return mockResponse(jurisdiction as Jurisdiction, 'sample');
     return toResponse(await analyzeSample(sampleId, jurisdiction as Jurisdiction));
   }
 
@@ -290,6 +296,9 @@ async function handleAnalyze(request: NextRequest): Promise<Response> {
       { status: 422 },
     );
   }
+
+  // Validation above still runs in test mode; only the model call (and its quota) is replaced.
+  if (isTestMode()) return mockResponse(jurisdiction as Jurisdiction, 'upload');
 
   // Counted only once the request is about to reach Claude, so invalid uploads can't burn quota.
   const quota = await consumeQuota(clientKey(request.headers));

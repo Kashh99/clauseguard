@@ -16,4 +16,6 @@ export interface ContractAnalysis {
   contractType: string;
   jurisdiction: Jurisdiction;
   clauses: ClauseAnalysis[];
+  // Set only on mock responses from test mode (see lib/test-mode.ts).
+  testMode?: true;
 }
