@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server';
 import { createHash } from 'node:crypto';
 import Anthropic, { APIConnectionTimeoutError, APIError } from '@anthropic-ai/sdk';
 import pdfParse from 'pdf-parse';
-import { kv } from '@vercel/kv';
+import { getRedis } from '@/lib/kv';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
@@ -219,7 +219,7 @@ async function analyzeSample(sampleId: string, jurisdiction: Jurisdiction, clien
 async function loadSample(key: string, sampleId: string, jurisdiction: Jurisdiction, clientId: string): Promise<AnalysisResult> {
   const sample = SAMPLE_CONTRACTS[sampleId];
   try {
-    const cached = await kv.get<ContractAnalysis>(key);
+    const cached = await getRedis().get<ContractAnalysis>(key);
     if (cached) return { ok: true, analysis: cached };
   } catch {
     // KV unavailable — treat as a miss; the quota check below decides whether to call Claude.
@@ -231,7 +231,7 @@ async function loadSample(key: string, sampleId: string, jurisdiction: Jurisdict
   const fresh = await analyzeWithRefund(sample.text, jurisdiction, sample.contractType, quota);
   if (fresh.ok) {
     try {
-      await kv.set(key, fresh.analysis, { ex: SAMPLE_CACHE_TTL_SECONDS });
+      await getRedis().set(key, fresh.analysis, { ex: SAMPLE_CACHE_TTL_SECONDS });
     } catch {
       // KV unavailable — the in-memory memo still serves this instance.
     }

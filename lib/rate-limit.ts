@@ -1,5 +1,5 @@
-import { kv } from '@vercel/kv';
-import type { VercelKV } from '@vercel/kv';
+import type { Redis } from '@upstash/redis';
+import { getRedis } from './kv';
 
 // Global cap bounds total API spend; the per-client cap stops one visitor from using it all.
 const DAILY_LIMIT = 20;
@@ -8,8 +8,8 @@ const PER_CLIENT_DAILY_LIMIT = 3;
 // Counter keys are per UTC day; two days of TTL covers clock skew around midnight.
 const QUOTA_TTL_SECONDS = 2 * 24 * 60 * 60;
 
-// Injectable so tests can substitute an in-memory store.
-type QuotaStore = Pick<VercelKV, 'multi' | 'eval'>;
+// Injectable so tests can substitute an in-memory store; defaults to the shared Redis client.
+type QuotaStore = Pick<Redis, 'multi' | 'eval'>;
 
 // A grant is required to call the model. `refundKey` is the client counter it charged, or null
 // when KV is unavailable in local dev and nothing was charged. A denial is plain data so a
@@ -41,7 +41,7 @@ export function clientKey(headers: Headers): string {
 
 // Charges one analysis to the global and client counters, or returns the 429/503 to send.
 // On a deployment, missing or failing KV denies the request rather than skipping the caps.
-export async function consumeQuota(clientId: string, store: QuotaStore = kv): Promise<QuotaResult> {
+export async function consumeQuota(clientId: string, store?: QuotaStore): Promise<QuotaResult> {
   const day = new Date().toISOString().slice(0, 10);
   const globalKey = `analyses:${day}`;
   const clientCounterKey = `analyses:${day}:${clientId}`;
@@ -50,7 +50,8 @@ export async function consumeQuota(clientId: string, store: QuotaStore = kv): Pr
   let clientCount: number;
   try {
     // INCR is atomic, so concurrent requests can't both read the same count and slip past the limit.
-    [globalCount, clientCount] = await store
+    // getRedis() throws here, inside the try, when Redis isn't configured.
+    [globalCount, clientCount] = await (store ?? getRedis())
       .multi()
       .incr(globalKey)
       .incr(clientCounterKey)
@@ -78,7 +79,7 @@ export async function consumeQuota(clientId: string, store: QuotaStore = kv): Pr
 
   // Give back the slots this rejected request took, so retries over the limit don't inflate the counts.
   try {
-    await store.multi().decr(globalKey).decr(clientCounterKey).exec();
+    await (store ?? getRedis()).multi().decr(globalKey).decr(clientCounterKey).exec();
   } catch {
     // Counters only over-count here, which errs on the side of rejecting.
   }
@@ -107,9 +108,9 @@ return count or 0
 // The global counter keeps the slot: it bounds API spend, and the failed call may still have
 // used tokens. `refundKey` comes from consumeQuota, so a request that straddles UTC midnight
 // refunds the day it was charged to.
-export async function refundClientQuota(refundKey: string, store: QuotaStore = kv): Promise<void> {
+export async function refundClientQuota(refundKey: string, store?: QuotaStore): Promise<void> {
   try {
-    await store.eval(REFUND_SCRIPT, [refundKey], []);
+    await (store ?? getRedis()).eval(REFUND_SCRIPT, [refundKey], []);
   } catch {
     // KV unavailable — the visitor keeps the over-count, which errs on the side of rejecting.
   }

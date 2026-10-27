@@ -1,6 +1,7 @@
 // Run with: npm test
 // Proves every real model call (uploads and sample cache misses) passes the daily caps first, that
 // cache hits are free, and that on Vercel a missing or failing quota store blocks the call.
+// Every test loads its own copy of the route, so each passes alone or in any order.
 import { test, mock, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import Anthropic from '@anthropic-ai/sdk';
@@ -14,11 +15,15 @@ delete process.env.VERCEL;
 delete process.env.VERCEL_ENV;
 delete process.env.CLAUSEGUARD_TEST_MODE;
 
-const { POST } = await import('@/app/api/analyze/route');
+// A fresh module instance per test: the route memoizes sample results in memory, and a shared
+// instance would let one test's analysis turn another test's cache miss into a hit.
+const ROUTE_URL = new URL('../app/api/analyze/route.ts', import.meta.url).href;
+let instance = 0;
+const loadRoute = async () => (await import(`${ROUTE_URL}?instance=${++instance}`)).POST;
 
-const DAY = new Date().toISOString().slice(0, 10);
-const GLOBAL_KEY = `analyses:${DAY}`;
-const clientCounter = ip => `analyses:${DAY}:${ip}`;
+const today = () => new Date().toISOString().slice(0, 10);
+const globalKey = () => `analyses:${today()}`;
+const clientCounter = ip => `analyses:${today()}:${ip}`;
 
 // In-memory Upstash REST API behind the mocked fetch: just the commands the app sends.
 const kvStore = new Map();
@@ -66,8 +71,10 @@ const MODEL_REPLY = {
 let modelCalls;
 let modelDelayMs = 0;
 let foreignFetches;
+let POST;
 
-beforeEach(() => {
+beforeEach(async () => {
+  POST = await loadRoute();
   kvStore.clear();
   kvFailure = null;
   kvDelayMs = 0;
@@ -87,6 +94,7 @@ beforeEach(() => {
 afterEach(() => {
   mock.restoreAll();
   delete process.env.VERCEL;
+  assert.equal(foreignFetches, 0, 'no network call other than to the fake KV store');
 });
 
 function sampleRequest(jurisdiction, ip = '203.0.113.1') {
@@ -117,12 +125,9 @@ function uploadRequest(ip = '203.0.113.1') {
   return new Request('http://localhost/api/analyze', { method: 'POST', body: form, headers: { 'x-real-ip': ip } });
 }
 
-const counters = ip => ({ global: Number(kvStore.get(GLOBAL_KEY) ?? 0), visitor: Number(kvStore.get(clientCounter(ip)) ?? 0) });
+const counters = ip => ({ global: Number(kvStore.get(globalKey()) ?? 0), visitor: Number(kvStore.get(clientCounter(ip)) ?? 0) });
 const sampleCacheKeys = () => [...kvStore.keys()].filter(k => k.startsWith('sample:'));
 
-// Successful sample results stay memoized in the route module for the life of the process, so
-// each test that expects a fresh miss uses a jurisdiction no earlier test analysed successfully.
-let sampleVersion; // version hash in the route's sample cache key, recorded by the first test
 
 test('a sample cache miss passes the caps, charges the visitor and global counters, then caches', async () => {
   const res = await POST(sampleRequest('Ontario'));
@@ -131,7 +136,6 @@ test('a sample cache miss passes the caps, charges the visitor and global counte
   assert.equal(modelCalls.mock.callCount(), 1);
   assert.deepEqual(counters('203.0.113.1'), { global: 1, visitor: 1 });
   assert.equal(sampleCacheKeys().length, 1, 'result written to the KV cache');
-  sampleVersion = sampleCacheKeys()[0].split(':').pop();
 
   // Same sample again, from another visitor: served from memory, no new charge or model call.
   const again = await POST(sampleRequest('Ontario', '198.51.100.9'));
@@ -141,17 +145,23 @@ test('a sample cache miss passes the caps, charges the visitor and global counte
 });
 
 test('a sample KV cache hit is free: no quota charged and no model call', async () => {
-  kvStore.set(`sample:ontario-lease:BC:${sampleVersion}`, JSON.stringify({ ...MODEL_REPLY, summary: 'from KV cache', jurisdiction: 'BC' }));
+  // One instance fills the shared KV cache; a second, with an empty memory cache, reads it.
+  assert.equal((await POST(sampleRequest('BC', '192.0.2.10'))).status, 200);
+  const [cacheKey] = sampleCacheKeys();
+  kvStore.set(cacheKey, JSON.stringify({ ...JSON.parse(kvStore.get(cacheKey)), summary: 'from KV cache' }));
+  modelCalls.mock.resetCalls();
+  const countersBefore = counters('192.0.2.77');
 
-  const res = await POST(sampleRequest('BC', '192.0.2.77'));
+  const freshInstance = await loadRoute();
+  const res = await freshInstance(sampleRequest('BC', '192.0.2.77'));
   assert.equal(res.status, 200);
   assert.equal((await res.json()).summary, 'from KV cache');
   assert.equal(modelCalls.mock.callCount(), 0);
-  assert.deepEqual(counters('192.0.2.77'), { global: 0, visitor: 0 });
+  assert.deepEqual(counters('192.0.2.77'), countersBefore);
 });
 
 test('a sample cache miss is refused when the global cap is exhausted, and the model is not reached', async () => {
-  kvStore.set(GLOBAL_KEY, '20');
+  kvStore.set(globalKey(), '20');
   const res = await POST(sampleRequest('California'));
   const body = await res.json();
   assert.equal(res.status, 429);
@@ -173,7 +183,7 @@ test('a sample cache miss is refused when the visitor cap is exhausted, and the 
 });
 
 test('an upload is refused when the global cap is exhausted, and the model is not reached', async () => {
-  kvStore.set(GLOBAL_KEY, '20');
+  kvStore.set(globalKey(), '20');
   const res = await POST(uploadRequest());
   assert.equal(res.status, 429);
   assert.equal((await res.json()).code, 'rate_limited');
@@ -222,8 +232,4 @@ test('a visitor who joined a refused miss retries on their own quota', async () 
   assert.equal(served.status, 200);
   assert.equal(modelCalls.mock.callCount(), 1);
   assert.deepEqual(counters('203.0.113.32'), { global: 1, visitor: 1 });
-});
-
-test('no test made a network call other than to the fake KV store', () => {
-  assert.equal(foreignFetches, 0);
 });
