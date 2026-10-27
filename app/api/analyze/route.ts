@@ -218,7 +218,10 @@ export async function POST(request: NextRequest) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  const parsed = await pdfParse(buffer);
+  // Pass a plain Uint8Array, not the Buffer: pdf.js's in-process worker copies a Buffer into
+  // Node's shared allocation pool and then reads the whole pool, so parses of a valid PDF
+  // intermittently fail ("bad XRef entry", "Command token too long") depending on pool contents.
+  const parsed = await pdfParse(new Uint8Array(buffer) as Buffer);
   const contractText = parsed.text.trim();
 
   if (!contractText) {
