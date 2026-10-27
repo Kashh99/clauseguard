@@ -28,9 +28,11 @@ export function clientKey(headers: Headers): string {
   return groups.slice(0, 4).map(g => parseInt(g, 16).toString(16)).join(':') + '::/64';
 }
 
+const today = () => new Date().toISOString().slice(0, 10);
+
 // Returns a 429/503 response when the request must be rejected, or null to proceed.
 export async function consumeQuota(clientId: string): Promise<Response | null> {
-  const day = new Date().toISOString().slice(0, 10);
+  const day = today();
   const globalKey = `analyses:${day}`;
   const clientCounterKey = `analyses:${day}:${clientId}`;
 
@@ -49,7 +51,7 @@ export async function consumeQuota(clientId: string): Promise<Response | null> {
     // Without KV there is no limit. Allow that only for local dev, never on a deployment.
     if (process.env.VERCEL) {
       return Response.json(
-        { error: 'Analysis is temporarily unavailable — please try again later.' },
+        { error: 'Analysis is temporarily unavailable — please try again later.', code: 'quota_unavailable' },
         { status: 503 },
       );
     }
@@ -70,7 +72,20 @@ export async function consumeQuota(clientId: string): Promise<Response | null> {
       error: clientCount > PER_CLIENT_DAILY_LIMIT
         ? `You've used your ${PER_CLIENT_DAILY_LIMIT} free analyses for today. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.`
         : 'Daily demo limit reached. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.',
+      code: 'rate_limited',
     },
     { status: 429 },
   );
+}
+
+// Gives back a visitor's slot after a failure they couldn't have caused (timeout, API outage).
+// The global counter keeps the slot: it bounds API spend, and the failed call may still have
+// used tokens. A request that straddles UTC midnight refunds the new day's counter, which at
+// worst grants one extra attempt.
+export async function refundClientQuota(clientId: string): Promise<void> {
+  try {
+    await kv.decr(`analyses:${today()}:${clientId}`);
+  } catch {
+    // KV unavailable — the visitor keeps the over-count, which errs on the side of rejecting.
+  }
 }

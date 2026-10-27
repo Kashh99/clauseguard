@@ -1,12 +1,12 @@
 import type { NextRequest } from 'next/server';
 import { createHash } from 'node:crypto';
-import Anthropic, { APIConnectionTimeoutError } from '@anthropic-ai/sdk';
+import Anthropic, { APIConnectionTimeoutError, APIError } from '@anthropic-ai/sdk';
 import pdfParse from 'pdf-parse';
 import { kv } from '@vercel/kv';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
-import { clientKey, consumeQuota } from '@/lib/rate-limit';
+import { clientKey, consumeQuota, refundClientQuota } from '@/lib/rate-limit';
 
 // Timeout budget: up to 2 attempts × 120s = 240s for the Claude call, leaving headroom for
 // PDF parsing under the 300s function limit. A full analysis takes ~50s, so the old 60s
@@ -50,9 +50,17 @@ You must return a single valid JSON object matching this exact schema — no mar
   ]
 }`;
 
+// `code` lets the client tell failure kinds apart. `upstream` marks failures the uploader
+// can't cause (timeouts, API outages), which are the only ones that give back their quota slot.
 type AnalysisResult =
   | { ok: true; analysis: ContractAnalysis }
-  | { ok: false; status: number; error: string };
+  | { ok: false; status: number; error: string; code: string; upstream?: boolean };
+
+// Logs never include contract text: only error names, messages and request metadata.
+function errorMessage(err: unknown): string {
+  if (err && typeof err === 'object' && 'message' in err) return String(err.message);
+  return String(err);
+}
 
 async function analyzeContract(
   contractText: string,
@@ -90,14 +98,26 @@ ${truncated}`,
     });
   } catch (err) {
     if (err instanceof APIConnectionTimeoutError) {
-      return { ok: false, status: 504, error: 'Analysis timed out — please try again' };
+      console.error('analyze: Claude request timed out');
+      return { ok: false, status: 504, error: 'Analysis timed out — please try again', code: 'analysis_timeout', upstream: true };
+    }
+    if (err instanceof APIError) {
+      console.error('analyze: Claude API error', { name: err.name, status: err.status, requestId: err.requestID });
+      return {
+        ok: false,
+        status: 502,
+        error: 'The analysis service is having trouble right now — please try again in a moment.',
+        code: 'analysis_unavailable',
+        upstream: true,
+      };
     }
     throw err;
   }
 
   const responseBlock = message.content[0];
-  if (responseBlock.type !== 'text') {
-    return { ok: false, status: 500, error: 'Unexpected response format from AI' };
+  if (responseBlock?.type !== 'text') {
+    console.error('analyze: unexpected response block', { type: responseBlock?.type, stopReason: message.stop_reason });
+    return { ok: false, status: 500, error: 'Unexpected response format from AI', code: 'analysis_invalid' };
   }
 
   // Strip markdown code fences if Claude wraps the JSON anyway.
@@ -110,11 +130,13 @@ ${truncated}`,
   try {
     analysis = JSON.parse(jsonText);
   } catch {
-    return { ok: false, status: 500, error: 'AI returned malformed JSON — please retry' };
+    console.error('analyze: malformed JSON from Claude', { stopReason: message.stop_reason, outputChars: raw.length });
+    return { ok: false, status: 500, error: 'AI returned malformed JSON — please retry', code: 'analysis_invalid' };
   }
 
   if (!analysis || typeof analysis !== 'object' || !Array.isArray(analysis.clauses)) {
-    return { ok: false, status: 500, error: 'AI returned an unexpected response shape — please retry' };
+    console.error('analyze: unexpected JSON shape from Claude', { stopReason: message.stop_reason });
+    return { ok: false, status: 500, error: 'AI returned an unexpected response shape — please retry', code: 'analysis_invalid' };
   }
 
   const VALID_RISK = new Set(['green', 'amber', 'red']);
@@ -122,7 +144,8 @@ ${truncated}`,
     c => !c.title || !VALID_RISK.has(c.riskLevel),
   );
   if (invalidClause) {
-    return { ok: false, status: 500, error: 'AI returned invalid clause data — please retry' };
+    console.error('analyze: invalid clause data from Claude', { clauses: analysis.clauses.length });
+    return { ok: false, status: 500, error: 'AI returned invalid clause data — please retry', code: 'analysis_invalid' };
   }
 
   analysis.jurisdiction = jurisdiction;
@@ -174,10 +197,27 @@ function analyzeSample(sampleId: string, jurisdiction: Jurisdiction): Promise<An
 function toResponse(result: AnalysisResult) {
   return result.ok
     ? Response.json(result.analysis)
-    : Response.json({ error: result.error }, { status: result.status });
+    : Response.json({ error: result.error, code: result.code }, { status: result.status });
 }
 
+// Anything that escapes the handler would otherwise reach the client as an empty-bodied 500.
 export async function POST(request: NextRequest) {
+  try {
+    return await handleAnalyze(request);
+  } catch (err) {
+    console.error('analyze: unhandled error', {
+      name: err instanceof Error ? err.name : typeof err,
+      message: errorMessage(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return Response.json(
+      { error: 'Something went wrong on our end — please try again.', code: 'server_error' },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleAnalyze(request: NextRequest): Promise<Response> {
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -218,22 +258,45 @@ export async function POST(request: NextRequest) {
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());
-  // Pass a plain Uint8Array, not the Buffer: pdf.js's in-process worker copies a Buffer into
-  // Node's shared allocation pool and then reads the whole pool, so parses of a valid PDF
-  // intermittently fail ("bad XRef entry", "Command token too long") depending on pool contents.
-  const parsed = await pdfParse(new Uint8Array(buffer) as Buffer);
-  const contractText = parsed.text.trim();
+  let contractText: string;
+  try {
+    // Pass a plain Uint8Array, not the Buffer: pdf.js's in-process worker copies a Buffer into
+    // Node's shared allocation pool and then reads the whole pool, so parses of a valid PDF
+    // intermittently fail ("bad XRef entry", "Command token too long") depending on pool contents.
+    contractText = (await pdfParse(new Uint8Array(buffer) as Buffer)).text.trim();
+  } catch (err) {
+    // pdf-parse throws on damaged or non-standard PDFs (e.g. "bad XRef entry"). The byte counts,
+    // hash and markers identify the upload and show truncation without logging its contents.
+    console.error('analyze: PDF parse failed', {
+      error: errorMessage(err),
+      bytes: buffer.length,
+      declaredBytes: file.size,
+      sha256: createHash('sha256').update(buffer).digest('hex').slice(0, 16),
+      pdfHeader: buffer.subarray(0, 5).toString('latin1') === '%PDF-',
+      eofMarker: buffer.subarray(-1024).includes('%%EOF'),
+    });
+    return Response.json(
+      {
+        error: "We couldn't read this PDF — it may be damaged or use an unusual format. Try re-saving it (e.g. Print → Save as PDF) and uploading again.",
+        code: 'pdf_unreadable',
+      },
+      { status: 422 },
+    );
+  }
 
   if (!contractText) {
     return Response.json(
-      { error: 'Could not extract any text from this PDF. It may be scanned or image-only.' },
+      { error: 'Could not extract any text from this PDF. It may be scanned or image-only.', code: 'pdf_no_text' },
       { status: 422 },
     );
   }
 
   // Counted only once the request is about to reach Claude, so invalid uploads can't burn quota.
-  const limit = await consumeQuota(clientKey(request.headers));
+  const clientId = clientKey(request.headers);
+  const limit = await consumeQuota(clientId);
   if (limit) return limit;
 
-  return toResponse(await analyzeContract(contractText, jurisdiction as Jurisdiction, contractTypeHint));
+  const result = await analyzeContract(contractText, jurisdiction as Jurisdiction, contractTypeHint);
+  if (!result.ok && result.upstream) await refundClientQuota(clientId);
+  return toResponse(result);
 }

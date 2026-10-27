@@ -262,20 +262,39 @@ export default function Home() {
     if (contractType) fd.append('contractType', contractType);
 
     try {
-      const res  = await fetch('/api/analyze', { method: 'POST', body: fd });
-      const data = await res.json();
+      let res: Response;
+      try {
+        res = await fetch('/api/analyze', { method: 'POST', body: fd });
+      } catch {
+        // Only a rejected fetch means the request never got a response.
+        setError('Could not reach the server. Please check your connection and try again.');
+        return;
+      }
+
+      // Platform errors (crashes, gateway timeouts) can arrive with an empty or HTML body.
+      let data: { error?: unknown; clauses?: unknown } | null = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+
       if (!res.ok) {
         if (res.status === 429) {
           setRateLimited(true);
+        } else if (typeof data?.error === 'string') {
+          setError(data.error);
         } else {
-          setError(data.error ?? 'Analysis failed.');
+          setError(`Something went wrong on our end (error ${res.status}). Please try again in a moment.`);
         }
         return;
       }
-      setAnalysis(data);
+      if (!data || !Array.isArray(data.clauses)) {
+        setError('The server sent an unexpected response. Please try again.');
+        return;
+      }
+      setAnalysis(data as ContractAnalysis);
       setTimeout(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth' }), 150);
-    } catch {
-      setError('Network error. Please check your connection and try again.');
     } finally {
       setIsLoading(false);
     }
