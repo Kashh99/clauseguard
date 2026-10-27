@@ -292,11 +292,10 @@ async function handleAnalyze(request: NextRequest): Promise<Response> {
   }
 
   // Counted only once the request is about to reach Claude, so invalid uploads can't burn quota.
-  const clientId = clientKey(request.headers);
-  const limit = await consumeQuota(clientId);
-  if (limit) return limit;
+  const quota = await consumeQuota(clientKey(request.headers));
+  if (!quota.ok) return quota.response;
 
   const result = await analyzeContract(contractText, jurisdiction as Jurisdiction, contractTypeHint);
-  if (!result.ok && result.upstream) await refundClientQuota(clientId);
+  if (!result.ok && result.upstream && quota.refundKey) await refundClientQuota(quota.refundKey);
   return toResponse(result);
 }
