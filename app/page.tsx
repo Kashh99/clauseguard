@@ -378,7 +378,7 @@ export default function Home() {
 
           {/* Free demo note */}
           <p className="mt-3 text-center text-xs text-zinc-600">
-            Free demo · 20 analyses/day shared across all visitors
+            Free demo · 3 analyses per visitor per day
           </p>
 
           {/* Sample button — visible only when no input is loaded */}

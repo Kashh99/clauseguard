@@ -6,13 +6,13 @@ import { kv } from '@vercel/kv';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
+import { clientKey, consumeQuota } from '@/lib/rate-limit';
 
 // Timeout budget: up to 2 attempts × 120s = 240s for the Claude call, leaving headroom for
 // PDF parsing under the 300s function limit. A full analysis takes ~50s, so the old 60s
 // limit let Vercel kill the function before our own 504 handler could run.
 export const maxDuration = 300;
 
-const DAILY_LIMIT = 20;
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -213,21 +213,6 @@ export async function POST(request: NextRequest) {
     return toResponse(await analyzeSample(sampleId, jurisdiction as Jurisdiction));
   }
 
-  // Rate-limit PDF uploads.
-  try {
-    const dateKey = `analyses:${new Date().toISOString().slice(0, 10)}`;
-    const count = (await kv.get<number>(dateKey)) ?? 0;
-    if (count >= DAILY_LIMIT) {
-      return Response.json(
-        { error: 'Daily demo limit reached. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.' },
-        { status: 429 },
-      );
-    }
-    await kv.set(dateKey, count + 1, { ex: 86400 });
-  } catch {
-    // KV unavailable (local dev without env vars) — skip rate limiting.
-  }
-
   if (!file || file.type !== 'application/pdf') {
     return Response.json({ error: 'A PDF file is required (field name: "file")' }, { status: 400 });
   }
@@ -242,6 +227,10 @@ export async function POST(request: NextRequest) {
       { status: 422 },
     );
   }
+
+  // Counted only once the request is about to reach Claude, so invalid uploads can't burn quota.
+  const limit = await consumeQuota(clientKey(request.headers));
+  if (limit) return limit;
 
   return toResponse(await analyzeContract(contractText, jurisdiction as Jurisdiction, contractTypeHint));
 }
