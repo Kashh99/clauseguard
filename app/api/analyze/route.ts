@@ -7,6 +7,7 @@ import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
 import { clientKey, consumeQuota, refundClientQuota } from '@/lib/rate-limit';
+import type { QuotaDenial, QuotaGrant } from '@/lib/rate-limit';
 import { isTestMode, mockResponse, TEST_MODE_MARKER } from '@/lib/test-mode';
 
 // Timeout budget: up to 2 attempts × 120s = 240s for the Claude call, leaving headroom for
@@ -53,9 +54,14 @@ You must return a single valid JSON object matching this exact schema — no mar
 
 // `code` lets the client tell failure kinds apart. `upstream` marks failures the uploader
 // can't cause (timeouts, API outages), which are the only ones that give back their quota slot.
+// `quotaRefused` marks a denial that belongs to the visitor who was charged, not the request.
 type AnalysisResult =
   | { ok: true; analysis: ContractAnalysis }
-  | { ok: false; status: number; error: string; code: string; upstream?: boolean };
+  | { ok: false; status: number; error: string; code: string; upstream?: boolean; quotaRefused?: boolean };
+
+function quotaRefusal(denial: QuotaDenial): AnalysisResult {
+  return { ok: false, status: denial.status, error: denial.error, code: denial.code, quotaRefused: true };
+}
 
 // Logs never include contract text: only error names, messages and request metadata.
 function errorMessage(err: unknown): string {
@@ -63,10 +69,12 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
+// Every model call needs a quota grant, so no path can reach Claude without passing the daily caps.
 async function analyzeContract(
   contractText: string,
   jurisdiction: Jurisdiction,
   contractTypeHint: string | null,
+  quota: QuotaGrant,
 ): Promise<AnalysisResult> {
   const truncated =
     contractText.length > MAX_TEXT_CHARS
@@ -75,6 +83,7 @@ async function analyzeContract(
 
   // Backstop: the handler answers test-mode requests with a mock before reaching here.
   if (isTestMode()) throw new Error(`${TEST_MODE_MARKER}: real model call blocked`);
+  if (quota?.ok !== true) throw new Error('model call attempted without a quota grant');
 
   // Send to Claude. The system prompt is marked for prompt caching; the contract
   // text is never cached since every document is unique.
@@ -162,7 +171,19 @@ ${truncated}`,
 // dedupes concurrent misses within an instance and covers local dev without KV.
 const sampleMemo = new Map<string, Promise<AnalysisResult>>();
 
-function analyzeSample(sampleId: string, jurisdiction: Jurisdiction): Promise<AnalysisResult> {
+// Gives the visitor's slot back when Claude itself failed (timeout, outage).
+async function analyzeWithRefund(
+  contractText: string,
+  jurisdiction: Jurisdiction,
+  contractTypeHint: string | null,
+  quota: QuotaGrant,
+): Promise<AnalysisResult> {
+  const result = await analyzeContract(contractText, jurisdiction, contractTypeHint, quota);
+  if (!result.ok && result.upstream && quota.refundKey) await refundClientQuota(quota.refundKey);
+  return result;
+}
+
+async function analyzeSample(sampleId: string, jurisdiction: Jurisdiction, clientId: string): Promise<AnalysisResult> {
   const sample = SAMPLE_CONTRACTS[sampleId];
   const version = createHash('sha256')
     .update(`${MODEL}\0${SYSTEM_PROMPT}\0${sample.text}`)
@@ -170,32 +191,52 @@ function analyzeSample(sampleId: string, jurisdiction: Jurisdiction): Promise<An
     .slice(0, 12);
   const key = `sample:${sampleId}:${jurisdiction}:${version}`;
 
-  const pending = sampleMemo.get(key);
-  if (pending) return pending;
-
-  const result = (async (): Promise<AnalysisResult> => {
-    try {
-      const cached = await kv.get<ContractAnalysis>(key);
-      if (cached) return { ok: true, analysis: cached };
-    } catch {
-      // KV unavailable — fall through to a live analysis.
-    }
-
-    const fresh = await analyzeContract(sample.text, jurisdiction, sample.contractType);
-    if (fresh.ok) {
-      try {
-        await kv.set(key, fresh.analysis, { ex: SAMPLE_CACHE_TTL_SECONDS });
-      } catch {
-        // KV unavailable — the in-memory memo still serves this instance.
+  // Concurrent requests for the same sample share one lookup and at most one model call, charged
+  // to the request that started it. If that visitor was refused, the others retry on their own quota.
+  let refused: Promise<AnalysisResult> | undefined;
+  for (;;) {
+    const pending = sampleMemo.get(key);
+    if (pending && pending !== refused) {
+      const shared = await pending;
+      if (!shared.ok && shared.quotaRefused) {
+        refused = pending;
+        continue;
       }
+      return shared;
     }
-    return fresh;
-  })();
 
-  sampleMemo.set(key, result);
-  // Only successes stay memoized; a failure (timeout, bad JSON) can be retried.
-  result.then(r => { if (!r.ok) sampleMemo.delete(key); }, () => sampleMemo.delete(key));
-  return result;
+    const result = loadSample(key, sampleId, jurisdiction, clientId);
+    sampleMemo.set(key, result);
+    // Only successes stay memoized; a failure (refusal, timeout, bad JSON) can be retried.
+    const forget = () => { if (sampleMemo.get(key) === result) sampleMemo.delete(key); };
+    result.then(r => { if (!r.ok) forget(); }, forget);
+    return result;
+  }
+}
+
+// Cache hits are free. A miss is a real model call, so it passes the same daily caps as an upload,
+// and a cache that can't be read counts as a miss rather than a reason to skip them.
+async function loadSample(key: string, sampleId: string, jurisdiction: Jurisdiction, clientId: string): Promise<AnalysisResult> {
+  const sample = SAMPLE_CONTRACTS[sampleId];
+  try {
+    const cached = await kv.get<ContractAnalysis>(key);
+    if (cached) return { ok: true, analysis: cached };
+  } catch {
+    // KV unavailable — treat as a miss; the quota check below decides whether to call Claude.
+  }
+
+  const quota = await consumeQuota(clientId);
+  if (!quota.ok) return quotaRefusal(quota);
+
+  const fresh = await analyzeWithRefund(sample.text, jurisdiction, sample.contractType, quota);
+  if (fresh.ok) {
+    try {
+      await kv.set(key, fresh.analysis, { ex: SAMPLE_CACHE_TTL_SECONDS });
+    } catch {
+      // KV unavailable — the in-memory memo still serves this instance.
+    }
+  }
+  return fresh;
 }
 
 function toResponse(result: AnalysisResult) {
@@ -249,14 +290,14 @@ async function handleAnalyze(request: NextRequest): Promise<Response> {
     );
   }
 
-  // Samples are served from cache, so they don't count against the daily limit.
+  // Samples served from cache are free; a cache miss is charged like an upload.
   if (sampleId !== null) {
     if (typeof sampleId !== 'string' || !Object.hasOwn(SAMPLE_CONTRACTS, sampleId)) {
       return Response.json({ error: 'Unknown sample' }, { status: 400 });
     }
     // Skips the KV cache too, so a mock is never stored as a sample's real analysis.
     if (isTestMode()) return mockResponse(jurisdiction as Jurisdiction, 'sample');
-    return toResponse(await analyzeSample(sampleId, jurisdiction as Jurisdiction));
+    return toResponse(await analyzeSample(sampleId, jurisdiction as Jurisdiction, clientKey(request.headers)));
   }
 
   if (!file || file.type !== 'application/pdf') {
@@ -302,9 +343,7 @@ async function handleAnalyze(request: NextRequest): Promise<Response> {
 
   // Counted only once the request is about to reach Claude, so invalid uploads can't burn quota.
   const quota = await consumeQuota(clientKey(request.headers));
-  if (!quota.ok) return quota.response;
+  if (!quota.ok) return toResponse(quotaRefusal(quota));
 
-  const result = await analyzeContract(contractText, jurisdiction as Jurisdiction, contractTypeHint);
-  if (!result.ok && result.upstream && quota.refundKey) await refundClientQuota(quota.refundKey);
-  return toResponse(result);
+  return toResponse(await analyzeWithRefund(contractText, jurisdiction as Jurisdiction, contractTypeHint, quota));
 }

@@ -11,11 +11,12 @@ const QUOTA_TTL_SECONDS = 2 * 24 * 60 * 60;
 // Injectable so tests can substitute an in-memory store.
 type QuotaStore = Pick<VercelKV, 'multi' | 'eval'>;
 
-// `refundKey` is the client counter this request was charged to, or null when KV is
-// unavailable in local dev and nothing was charged.
-export type QuotaResult =
-  | { ok: false; response: Response }
-  | { ok: true; refundKey: string | null };
+// A grant is required to call the model. `refundKey` is the client counter it charged, or null
+// when KV is unavailable in local dev and nothing was charged. A denial is plain data so a
+// sample request can share it with concurrent requests without sharing a Response body.
+export type QuotaGrant = { ok: true; refundKey: string | null };
+export type QuotaDenial = { ok: false; status: 429 | 503; error: string; code: string };
+export type QuotaResult = QuotaGrant | QuotaDenial;
 
 // Groups IPv6 clients by /64, since a single subscriber usually controls a whole /64.
 // On Vercel, x-real-ip is set by the edge network and can't be spoofed by the client.
@@ -39,6 +40,7 @@ export function clientKey(headers: Headers): string {
 }
 
 // Charges one analysis to the global and client counters, or returns the 429/503 to send.
+// On a deployment, missing or failing KV denies the request rather than skipping the caps.
 export async function consumeQuota(clientId: string, store: QuotaStore = kv): Promise<QuotaResult> {
   const day = new Date().toISOString().slice(0, 10);
   const globalKey = `analyses:${day}`;
@@ -55,15 +57,16 @@ export async function consumeQuota(clientId: string, store: QuotaStore = kv): Pr
       .expire(globalKey, QUOTA_TTL_SECONDS)
       .expire(clientCounterKey, QUOTA_TTL_SECONDS)
       .exec<[number, number, number, number]>();
+    // An error reply in place of a count must not read as "under the limit".
+    if (!Number.isFinite(globalCount) || !Number.isFinite(clientCount)) throw new Error('bad counter reply');
   } catch {
     // Without KV there is no limit. Allow that only for local dev, never on a deployment.
     if (process.env.VERCEL) {
       return {
         ok: false,
-        response: Response.json(
-          { error: 'Analysis is temporarily unavailable — please try again later.', code: 'quota_unavailable' },
-          { status: 503 },
-        ),
+        status: 503,
+        error: 'Analysis is temporarily unavailable — please try again later.',
+        code: 'quota_unavailable',
       };
     }
     return { ok: true, refundKey: null };
@@ -80,16 +83,14 @@ export async function consumeQuota(clientId: string, store: QuotaStore = kv): Pr
     // Counters only over-count here, which errs on the side of rejecting.
   }
 
-  const response = Response.json(
-    {
-      error: clientCount > PER_CLIENT_DAILY_LIMIT
-        ? `You've used your ${PER_CLIENT_DAILY_LIMIT} free analyses for today. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.`
-        : 'Daily demo limit reached. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.',
-      code: 'rate_limited',
-    },
-    { status: 429 },
-  );
-  return { ok: false, response };
+  return {
+    ok: false,
+    status: 429,
+    error: clientCount > PER_CLIENT_DAILY_LIMIT
+      ? `You've used your ${PER_CLIENT_DAILY_LIMIT} free analyses for today. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.`
+      : 'Daily demo limit reached. Come back tomorrow, or clone the repo and use your own API key from console.anthropic.com — it only takes 2 minutes.',
+    code: 'rate_limited',
+  };
 }
 
 // Decrements only a positive counter, so a refund can't go negative or recreate an expired key.
