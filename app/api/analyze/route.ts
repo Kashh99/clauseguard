@@ -6,6 +6,7 @@ import { getRedis } from '@/lib/kv';
 import { JURISDICTIONS } from '@/lib/types';
 import type { ContractAnalysis, Jurisdiction } from '@/lib/types';
 import { SAMPLE_CONTRACTS } from '@/lib/samples';
+import { jurisdictionRules } from '@/lib/jurisdiction-rules';
 import { clientKey, consumeQuota, refundClientQuota } from '@/lib/rate-limit';
 import type { QuotaDenial, QuotaGrant } from '@/lib/rate-limit';
 import { isTestMode, mockResponse, TEST_MODE_MARKER } from '@/lib/test-mode';
@@ -30,11 +31,13 @@ const SYSTEM_PROMPT = `You are a legal assistant specializing in contract analys
 When given a contract, you will:
 1. Identify all significant clauses (aim for 8–15 clauses covering the most important terms)
 2. Assess each clause's risk level for the party signing the contract:
-   - green: Standard and fair — common in contracts of this type, no cause for concern
+   - green: Standard and fair — common in contracts of this type, lawful in the signer's jurisdiction, no cause for concern
    - amber: Worth watching — unusual, one-sided, or potentially unfavorable; ask for clarification
    - red: Risky or highly unusual — strongly consider negotiating or seeking independent legal advice
 3. Explain each clause in clear, jargon-free language a non-lawyer can act on
 4. Provide a negotiation tip for amber and red clauses (null for green)
+
+Common is not the same as lawful. A clause that breaks a law of the signer's jurisdiction is red, however often it appears in contracts, and must never be called standard. Explain which law it breaks and what the signer is actually entitled to. When the request includes jurisdiction rules, apply them, including their scope and exceptions.
 
 You must return a single valid JSON object matching this exact schema — no markdown, no code fences, no prose outside the JSON:
 
@@ -67,6 +70,14 @@ function quotaRefusal(denial: QuotaDenial): AnalysisResult {
 function errorMessage(err: unknown): string {
   if (err && typeof err === 'object' && 'message' in err) return String(err.message);
   return String(err);
+}
+
+function userMessage(contractText: string, jurisdiction: Jurisdiction, contractTypeHint: string | null): string {
+  const rules = jurisdictionRules(jurisdiction);
+  return `Analyze this contract for someone in ${jurisdiction}.${contractTypeHint ? ` The user has identified this as a ${contractTypeHint}.` : ''} Apply ${jurisdiction} law, tenant/employee protections, and local market standards when assessing risk.
+${rules ? `\nJURISDICTION RULES:\n${rules}\n` : ''}
+CONTRACT:
+${contractText}`;
 }
 
 // Every model call needs a quota grant, so no path can reach Claude without passing the daily caps.
@@ -102,10 +113,7 @@ async function analyzeContract(
       messages: [
         {
           role: 'user',
-          content: `Analyze this contract for someone in ${jurisdiction}.${contractTypeHint ? ` The user has identified this as a ${contractTypeHint}.` : ''} Apply ${jurisdiction} law, tenant/employee protections, and local market standards when assessing risk.
-
-CONTRACT:
-${truncated}`,
+          content: userMessage(truncated, jurisdiction, contractTypeHint),
         },
       ],
     });
@@ -166,9 +174,9 @@ ${truncated}`,
 }
 
 // Sample analyses are deterministic inputs, so each (sample, jurisdiction) pair is analyzed
-// once and served from cache afterwards. The key includes a hash of the model, prompt and
-// sample text so editing any of them invalidates stale results. The in-memory map also
-// dedupes concurrent misses within an instance and covers local dev without KV.
+// once and served from cache afterwards. The key includes a hash of the model, prompt,
+// jurisdiction rules and sample text so editing any of them invalidates stale results. The
+// in-memory map also dedupes concurrent misses within an instance and covers local dev without KV.
 const sampleMemo = new Map<string, Promise<AnalysisResult>>();
 
 // Gives the visitor's slot back when Claude itself failed (timeout, outage).
@@ -186,7 +194,7 @@ async function analyzeWithRefund(
 async function analyzeSample(sampleId: string, jurisdiction: Jurisdiction, clientId: string): Promise<AnalysisResult> {
   const sample = SAMPLE_CONTRACTS[sampleId];
   const version = createHash('sha256')
-    .update(`${MODEL}\0${SYSTEM_PROMPT}\0${sample.text}`)
+    .update(`${MODEL}\0${SYSTEM_PROMPT}\0${jurisdictionRules(jurisdiction) ?? ''}\0${sample.text}`)
     .digest('hex')
     .slice(0, 12);
   const key = `sample:${sampleId}:${jurisdiction}:${version}`;
